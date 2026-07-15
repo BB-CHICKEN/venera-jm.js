@@ -10,7 +10,14 @@
 | 标识 | `jm` |
 | 版本 | `1.6.0` |
 | 最低 App 版本 | `1.5.0` |
-| 更新地址 | `https://ghfast.top/https://raw.githubusercontent.com/BB-CHICKEN/venera-jm.js/main/recode-jm.js` |
+
+## 订阅链接
+
+| 序号 | 链接 | 说明 |
+|------|------|------|
+| 1 | `https://raw.githubusercontent.com/BB-CHICKEN/venera-jm/refs/heads/main/recode-jm.js` | 需要梯子 |
+| 2 | `https://ghfast.top/https://raw.githubusercontent.com/BB-CHICKEN/venera-jm.js/main/recode-jm.js` | 镜像源 |
+| 3 | `https://raw.gitcode.com/BB-Ji/venera-jm/raw/main/recode-jm.js` | 可能无法及时更新 |
 
 ## 功能特性
 
