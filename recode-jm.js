@@ -1,7 +1,7 @@
 class JM extends ComicSource {
     name = "禁漫天堂(重构)"
     key = "jm"
-    version = "1.5.0"
+    version = "1.6.0"
     minAppVersion = "1.5.0"
 
     static jmVersion = "2.0.16"
@@ -9,6 +9,9 @@ class JM extends ComicSource {
     url = "https://ghfast.top/https://raw.githubusercontent.com/BB-CHICKEN/venera-jm.js/main/recode-jm.js"
 
     dailyCheckInInProgress = false
+    _loggedIn = false
+    _reLoginDialogShown = false
+    _renewing = false
 
     static fallbackServers = [
         "www.cdntwice.org",
@@ -16,7 +19,7 @@ class JM extends ComicSource {
         "www.cdnaspa.cc",
         "www.cdnntr.cc",
     ];
-
+    static apiDomains = JM.fallbackServers;
     static imageUrl = "https://cdn-msp.jmapinodeudzn.net"
 
     static ua = "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.0.0 Mobile Safari/537.36"
@@ -26,8 +29,11 @@ class JM extends ComicSource {
     }
 
     get baseUrl() {
-        let index = parseInt(this.loadSetting('apiDomain')) - 1
-        return `https://${JM.apiDomains[index]}`
+        let index = parseInt(this.loadSetting('apiDomain')) - 1;
+        if (isNaN(index) || index < 0 || index >= JM.apiDomains.length) {
+            index = 0;
+        }
+        return `https://${JM.apiDomains[index]}`;
     }
 
     get imageUrl() {
@@ -106,11 +112,33 @@ class JM extends ComicSource {
         return `${this.imageUrl}/media/users/${imageName}`
     }
 
+    // ---------- 初始化 ----------
     async init() {
-        if (this.loadSetting('refreshDomainsOnStart')) await this.refreshApiDomains(false)
-        this.refreshImgUrl(false)
+        if (this.loadSetting('refreshDomainsOnStart')) await this.refreshApiDomains(false);
+        this.refreshImgUrl(false);
+        await this._autoLogin();
     }
 
+    // ---------- 自动登录（从设置读取凭证） ----------
+    async _autoLogin() {
+        const username = this.loadSetting('jm_account');
+        const password = this.loadSetting('jm_pwd');
+        if (!username || !password) {
+            this._loggedIn = false;
+            console.warn("⚠️ 请在设置中填写 JM 账号和密码");
+            return;
+        }
+        try {
+            await this.account.login(username, password);
+            this._loggedIn = true;
+            console.log("✅ 插件自动登录成功");
+        } catch (e) {
+            this._loggedIn = false;
+            console.warn("❌ 自动登录失败", e);
+        }
+    }
+
+    // ---------- 域名刷新 ----------
     async refreshApiDomains(showConfirmDialog) {
         let url = "https://rup4a04-c02.tos-cn-hongkong.bytepluses.com/newsvr-2025.txt"
         let domainSecret = "diosfjckwpqpdfjkvnqQjsik"
@@ -178,6 +206,8 @@ class JM extends ComicSource {
             this.overwriteImgUrl(setting["img_host"])
         }
     }
+
+    // ---------- 节点测速 ----------
     async testApiNode(domain) {
         let testPath = "/promote?page=0"
         let url = `https://${domain}${testPath}`
@@ -276,6 +306,7 @@ class JM extends ComicSource {
         )
     }
 
+    // ---------- 数据转换 ----------
     parseComic(comic) {
         let id = comic.id.toString()
         let author = comic.author
@@ -315,21 +346,27 @@ class JM extends ComicSource {
         return res.substring(start, end + 1)
     }
 
+    // ---------- 核心请求方法 ----------
     async get(url) {
         let time = Math.floor(Date.now() / 1000)
         let kJmSecret = "185Hcomic3PAPP7R"
         let res = await Network.get(url, this.getApiHeaders(time))
         if (res.status !== 200) {
             if (res.status === 401) {
-                let json = JSON.parse(res.body)
-                let message = json.errorMsg
-                if (message === "請先登入會員" && this.isLogged) {
-                    this.showReLoginDialog()
-                    throw '登录已过期'
+                let json = JSON.parse(res.body);
+                let message = json.errorMsg;
+                if (message === "請先登入會員") {
+                    if (this._loggedIn && this.loadSetting('autoReLogin')) {
+                        try {
+                            let renewed = await this._handleAutoRenew(url, null, 'GET');
+                            if (renewed !== false) return renewed;
+                        } catch (e) { }
+                    }
+                    return await this.handleLoginExpired(url, null, 'GET');
                 }
-                throw message ?? '无效状态码：' + res.status
+                throw message ?? '无效状态码：' + res.status;
             }
-            throw '无效状态码：' + res.status
+            throw '无效状态码：' + res.status;
         }
         let json = JSON.parse(res.body)
         let data = json.data
@@ -337,32 +374,6 @@ class JM extends ComicSource {
             throw '无效数据'
         }
         return this.convertData(data, `${time}${kJmSecret}`)
-    }
-
-    showReLoginDialog() {
-        if (this._reLoginDialogShown) return
-        this._reLoginDialogShown = true
-        UI.showDialog(
-            "登录过期",
-            "登录已过期，是否重新登录？",
-            [
-                {
-                    text: "取消",
-                    callback: () => {
-                        this._reLoginDialogShown = false
-                        d
-                    }
-                },
-                {
-                    text: "重新登录",
-                    callback: () => {
-                        this._reLoginDialogShown = false
-                        this.account.logout()
-                        this.account.login()
-                    }
-                }
-            ]
-        )
     }
 
     async post(url, body) {
@@ -374,15 +385,20 @@ class JM extends ComicSource {
         }, body)
         if (res.status !== 200) {
             if (res.status === 401) {
-                let json = JSON.parse(res.body)
-                let message = json.errorMsg
-                if (message === "請先登入會員" && this.isLogged) {
-                    this.showReLoginDialog()
-                    throw '登录已过期'
+                let json = JSON.parse(res.body);
+                let message = json.errorMsg;
+                if (message === "請先登入會員") {
+                    if (this._loggedIn && this.loadSetting('autoReLogin')) {
+                        try {
+                            let renewed = await this._handleAutoRenew(url, body, 'POST');
+                            if (renewed !== false) return renewed;
+                        } catch (e) { }
+                    }
+                    return await this.handleLoginExpired(url, body, 'POST');
                 }
-                throw message ?? '无效状态码：' + res.status
+                throw message ?? '无效状态码：' + res.status;
             }
-            throw '无效状态码：' + res.status
+            throw '无效状态码：' + res.status;
         }
         let json = JSON.parse(res.body)
         let data = json.data
@@ -392,6 +408,117 @@ class JM extends ComicSource {
         return this.convertData(data, `${time}${kJmSecret}`)
     }
 
+    // ---------- 登录过期处理（支持重试） ----------
+    handleLoginExpired(originalUrl, originalBody, method) {
+        if (this._reLoginDialogShown) {
+            return new Promise(() => { });
+        }
+        this._reLoginDialogShown = true;
+
+        return new Promise((resolve, reject) => {
+            UI.showDialog(
+                "登录过期",
+                "登录已过期，是否使用设置中的账号密码重新登录？",
+                [
+                    {
+                        text: "取消",
+                        callback: () => {
+                            this._reLoginDialogShown = false;
+                            reject("用户取消重登");
+                        }
+                    },
+                    {
+                        text: "重新登录",
+                        callback: async () => {
+                            this._reLoginDialogShown = false;
+                            const username = this.loadSetting('jm_account');
+                            const password = this.loadSetting('jm_pwd');
+                            if (!username || !password) {
+                                UI.showMessage("请先在设置中填写账号和密码");
+                                reject("无凭证");
+                                return;
+                            }
+                            try {
+                                await this.account.login(username, password);
+                                this._loggedIn = true;
+                                UI.showMessage("✅ 登录成功，正在重试...");
+                                let result;
+                                if (method === 'GET') {
+                                    result = await this.get(originalUrl);
+                                } else {
+                                    result = await this.post(originalUrl, originalBody);
+                                }
+                                resolve(result);
+                            } catch (e) {
+                                UI.showMessage("❌ 登录失败，请检查账号密码或网络");
+                                reject("登录失败: " + (e.message || e));
+                            }
+                        }
+                    }
+                ]
+            );
+        });
+    }
+
+    // ---------- 自动续期逻辑 ----------
+    async _handleAutoRenew(originalUrl, originalBody, method) {
+        if (this._renewing) return false;
+        this._renewing = true;
+
+        try {
+            const username = this.loadSetting('jm_account');
+            const password = this.loadSetting('jm_pwd');
+            if (!username || !password) {
+                UI.showMessage("❌ 请先在设置中填写账号和密码");
+                return false;
+            }
+
+            let time = Math.floor(Date.now() / 1000);
+            let kJmSecret = "185Hcomic3PAPP7R";
+
+            let loginRes = await Network.post(`${this.baseUrl}/login`, {
+                ...this.getApiHeaders(time),
+                "Content-Type": "application/x-www-form-urlencoded"
+            }, `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`);
+
+            if (loginRes.status !== 200) {
+                UI.showMessage(`❌ 续期失败：HTTP ${loginRes.status}`);
+                return false;
+            }
+
+            let loginJson = JSON.parse(loginRes.body);
+            if (!loginJson.data || typeof loginJson.data !== 'string') {
+                UI.showMessage("❌ 续期失败：响应异常");
+                return false;
+            }
+
+            let loginData = this.convertData(loginJson.data, `${time}${kJmSecret}`);
+            let json = JSON.parse(loginData);
+            if (!json.uid) {
+                UI.showMessage("❌ 续期失败：账号或密码错误");
+                return false;
+            }
+
+            this.saveData("uid", json.uid);
+            this._loggedIn = true;
+            UI.showMessage("✅ 自动续期成功，正在重试...", true);
+
+            await new Promise(r => setTimeout(r, 800));
+
+            if (method === 'GET') {
+                return await this.get(originalUrl);
+            } else {
+                return await this.post(originalUrl, originalBody);
+            }
+        } catch (e) {
+            UI.showMessage(`❌ 续期异常：${e.message || e}`);
+            return false;
+        } finally {
+            this._renewing = false;
+        }
+    }
+
+    // ---------- 签到 ----------
     async dailyCheckIn(isTask = false) {
         if (this.dailyCheckInInProgress) return
         this.dailyCheckInInProgress = true
@@ -406,9 +533,23 @@ class JM extends ComicSource {
                 if (isTask) return
                 throwError("今日已签到")
             }
-            if (!this.isLogged) {
-                if (isTask) return
-                throwError("请先登录再签到")
+            if (!this._loggedIn) {
+                // 尝试用设置中的账号密码自动登录
+                const username = this.loadSetting('jm_account');
+                const password = this.loadSetting('jm_pwd');
+                if (username && password) {
+                    try {
+                        await this.account.login(username, password);
+                        this._loggedIn = true;
+                        UI.showMessage("✅ 自动登录成功");
+                    } catch (e) {
+                        if (isTask) return;
+                        throwError("自动登录失败，请检查账号密码或网络");
+                    }
+                } else {
+                    if (isTask) return;
+                    throwError("请先在设置中填写账号和密码");
+                }
             }
             const uid = this.loadData("uid")
             if (!uid) {
@@ -432,29 +573,35 @@ class JM extends ComicSource {
         }
     }
 
+    // ---------- 账号管理 ----------
     account = {
         login: async (account, pwd) => {
-            let time = Math.floor(Date.now() / 1000)
+            let time = Math.floor(Date.now() / 1000);
             let res = await this.post(
                 `${this.baseUrl}/login`,
                 `username=${encodeURIComponent(account)}&password=${encodeURIComponent(pwd)}`
-            )
-            let json = JSON.parse(res)
+            );
+            let json = JSON.parse(res);
             if (json.uid) {
-                this.saveData("uid", json.uid)
+                this.saveData("uid", json.uid);
+                this._loggedIn = true;
+                return "ok";
             }
-            throw '登录成功'
+            throw "登录失败，未返回 uid";
         },
 
         logout: () => {
             for (let url of JM.apiDomains) {
                 Network.deleteCookies(url)
             }
+            this._loggedIn = false;
+            this.saveData("uid", null);
         },
 
         registerWebsite: null
     }
 
+    // ---------- 探索 ----------
     explore = [
         {
             title: "禁漫天堂",
@@ -487,6 +634,7 @@ class JM extends ComicSource {
         }
     ]
 
+    // ---------- 分类 ----------
     category = {
         title: "禁漫天堂",
         parts: [
@@ -518,24 +666,8 @@ class JM extends ComicSource {
                 name: "主題A漫",
                 type: "fixed",
                 categories: [
-                    '無修正',
-                    '劇情向',
-                    '青年漫',
-                    '校服',
-                    '純愛',
-                    '人妻',
-                    '教師',
-                    '百合',
-                    'Yaoi',
-                    '性轉',
-                    'NTR',
-                    '女裝',
-                    '癡女',
-                    '全彩',
-                    '女性向',
-                    '完結',
-                    '純愛',
-                    '禁漫漢化組'
+                    '無修正', '劇情向', '青年漫', '校服', '純愛', '人妻', '教師', '百合',
+                    'Yaoi', '性轉', 'NTR', '女裝', '癡女', '全彩', '女性向', '完結', '禁漫漢化組'
                 ],
                 itemType: "search",
             },
@@ -543,19 +675,8 @@ class JM extends ComicSource {
                 name: "角色扮演",
                 type: "fixed",
                 categories: [
-                    '御姐',
-                    '熟女',
-                    '巨乳',
-                    '貧乳',
-                    '女性支配',
-                    '教師',
-                    '女僕',
-                    '護士',
-                    '泳裝',
-                    '眼鏡',
-                    '連褲襪',
-                    '其他制服',
-                    '兔女郎'
+                    '御姐', '熟女', '巨乳', '貧乳', '女性支配', '教師', '女僕', '護士',
+                    '泳裝', '眼鏡', '連褲襪', '其他制服', '兔女郎'
                 ],
                 itemType: "search",
             },
@@ -563,24 +684,8 @@ class JM extends ComicSource {
                 name: "特殊PLAY",
                 type: "fixed",
                 categories: [
-                    '群交',
-                    '足交',
-                    '束縛',
-                    '肛交',
-                    '阿黑顏',
-                    '藥物',
-                    '扶他',
-                    '調教',
-                    '野外露出',
-                    '催眠',
-                    '自慰',
-                    '觸手',
-                    '獸交',
-                    '亞人',
-                    '怪物女孩',
-                    '皮物',
-                    'ryona',
-                    '騎大車'
+                    '群交', '足交', '束縛', '肛交', '阿黑顏', '藥物', '扶他', '調教',
+                    '野外露出', '催眠', '自慰', '觸手', '獸交', '亞人', '怪物女孩', '皮物', 'ryona', '騎大車'
                 ],
                 itemType: "search",
             },
@@ -670,6 +775,7 @@ class JM extends ComicSource {
         }
     }
 
+    // ---------- 搜索 ----------
     search = {
         load: async (keyword, options, page) => {
             keyword = keyword.trim()
@@ -707,6 +813,7 @@ class JM extends ComicSource {
         ],
     }
 
+    // ---------- 收藏 ----------
     favorites = {
         multiFolder: true,
         addOrDelFavorite: async (comicId, folderId, isAdding, favoriteId) => {
@@ -752,6 +859,7 @@ class JM extends ComicSource {
         singleFolderForSingleComic: true,
     }
 
+    // ---------- 漫画详情 ----------
     comic = {
         loadInfo: async (id) => {
             if (id.startsWith('jm')) {
@@ -852,7 +960,6 @@ class JM extends ComicSource {
             }
             return {
                 headers: this.getImgHeaders(),
-                // gif 图片不需要修改
                 modifyImage: url.endsWith(".gif")
                     ? null
                     : `
@@ -926,6 +1033,7 @@ class JM extends ComicSource {
         },
     }
 
+    // ---------- 设置 ----------
     settings = {
         refreshDomains: {
             title: "Refresh Domain List",
@@ -942,18 +1050,10 @@ class JM extends ComicSource {
             title: "Api Domain",
             type: "select",
             options: [
-                {
-                    value: '1',
-                },
-                {
-                    value: '2',
-                },
-                {
-                    value: '3',
-                },
-                {
-                    value: '4',
-                },
+                { value: '1' },
+                { value: '2' },
+                { value: '3' },
+                { value: '4' },
             ],
             default: "1",
         },
@@ -961,55 +1061,60 @@ class JM extends ComicSource {
             title: "Image Stream",
             type: "select",
             options: [
-                {
-                    value: '1',
-                },
-                {
-                    value: '2',
-                },
-                {
-                    value: '3',
-                },
-                {
-                    value: '4',
-                },
+                { value: '1' },
+                { value: '2' },
+                { value: '3' },
+                { value: '4' },
             ],
             default: "1",
         },
+        optimizeNodes: {
+            title: "节点优选",
+            type: "callback",
+            buttonText: "开始测速",
+            callback: () => this.optimizeNodes()
+        },
         favoriteOrder: {
-            title: "Favorite Order",
+            title: "收藏夹排序",
             type: "select",
             options: [
-                {
-                    value: 'mr',
-                    text: 'Add Time',
-                },
-                {
-                    value: 'mp',
-                    text: 'Update Time',
-                }
+                { value: 'mr', text: '添加时间' },
+                { value: 'mp', text: '更新时间' }
             ],
             default: 'mr'
         },
         dailyCheckInTask: {
-            title: "Daily Check-in Task",
+            title: "每日自动签到",
             type: "switch",
             default: false
         },
         dailyCheckIn: {
-            title: "Manual Check-In",
+            title: "手动签到",
             type: "callback",
-            buttonText: "Check-In",
+            buttonText: "签到",
             callback: () => this.dailyCheckIn()
         },
-        optimizeNodes: {
-            title: "Optimize Nodes",
-            type: "callback",
-            buttonText: "Start Test",
-            callback: () => this.optimizeNodes()
+        autoReLogin: {
+            title: "自动重登（保持登录）",
+            type: "switch",
+            default: true,
         },
+        // 账号密码输入框（避免关键字屏蔽）
+        jm_account: {
+            title: "JM 账号(替换软件登录)",
+            type: "input",
+            default: ""
+        },
+        jm_pwd: {
+            title: "JM 密码(请退出下方的软件登录)",
+            type: "input",   // 如果框架不支持 password，可改为 input，但会明文显示
+            default: ""
+        },
+
+
     }
 
+    // ---------- 翻译 ----------
     translation = {
         'zh_CN': {
             'Refresh Domain List': '刷新域名列表',
@@ -1031,6 +1136,9 @@ class JM extends ComicSource {
             'View': '浏览量',
             'Optimize Nodes': '节点优选',
             'Start Test': '开始测速',
+            'autoReLogin': '自动重登（保持登录）',
+            'jm_account': 'JM 账号',
+            'jm_pwd': 'JM 密码',
         },
         'zh_TW': {
             'Refresh Domain List': '刷新域名列表',
@@ -1052,6 +1160,9 @@ class JM extends ComicSource {
             'View': '瀏覽量',
             'Optimize Nodes': '節點優選',
             'Start Test': '開始測速',
+            'autoReLogin': '自動重登（保持登錄）',
+            'jm_account': 'JM 帳號',
+            'jm_pwd': 'JM 密碼',
         },
     }
 }
