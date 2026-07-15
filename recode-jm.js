@@ -217,7 +217,7 @@ class JM extends ComicSource {
         try {
             let fetchPromise = fetch(url, { headers: this.getApiHeaders(time) })
             let timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('timeout')), 10000)
+                setTimeout(() => reject(new Error('timeout')), 5000)
             )
             let res = await Promise.race([fetchPromise, timeoutPromise])
             if (res.status !== 200) {
