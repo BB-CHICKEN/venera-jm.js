@@ -1,7 +1,7 @@
 class JM extends ComicSource {
     name = "禁漫天堂(重构)"
     key = "jm"
-    version = "1.6.0"
+    version = "1.7.0"
     minAppVersion = "1.5.0"
 
     static jmVersion = "2.0.16"
@@ -207,31 +207,26 @@ class JM extends ComicSource {
         }
     }
 
-    // ---------- 节点测速 ----------
+    // ---------- 节点 Ping ----------
     async testApiNode(domain) {
-        let testPath = "/promote?page=0"
+        let testPath = "/promote?page=1"
         let url = `https://${domain}${testPath}`
         let time = Math.floor(Date.now() / 1000)
-        let startTime = Date.now()
 
         try {
             let fetchPromise = fetch(url, { headers: this.getApiHeaders(time) })
             let timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('timeout')), 5000)
             )
+            let startTime = Date.now()
             let res = await Promise.race([fetchPromise, timeoutPromise])
             if (res.status !== 200) {
-                return { success: false, speed: 0, size: 0, latency: 0 }
+                return { success: false, latency: 0 }
             }
             let latency = Date.now() - startTime
-            let data = await res.text()
-            let elapsed = latency / 1000
-            let encoded = Convert.encodeUtf8(data)
-            let sizeBytes = encoded.byteLength || encoded.length || data.length
-            let speedMBps = (sizeBytes / 1024 / 1024) / elapsed
-            return { success: true, speed: speedMBps, size: sizeBytes, latency: latency }
+            return { success: true, latency: latency }
         } catch (e) {
-            return { success: false, speed: 0, size: 0, latency: 0 }
+            return { success: false, latency: 0 }
         }
     }
 
@@ -250,7 +245,7 @@ class JM extends ComicSource {
     }
 
     async optimizeNodes() {
-        UI.showMessage("正在测试节点速度...")
+        UI.showMessage("正在测试节点延迟...")
 
         let results = []
         for (let i = 0; i < JM.apiDomains.length; i++) {
@@ -259,8 +254,6 @@ class JM extends ComicSource {
             results.push({
                 index: i + 1,
                 domain: domain,
-                speed: result.speed,
-                size: result.size,
                 latency: result.latency,
                 success: result.success
             })
@@ -270,20 +263,15 @@ class JM extends ComicSource {
             if (!a.success && !b.success) return 0
             if (!a.success) return 1
             if (!b.success) return -1
-            return b.speed - a.speed
+            return a.latency - b.latency
         })
 
-        let message = "节点测速结果:\n\n"
+        let message = "节点延迟测试结果:\n\n"
         for (let i = 0; i < results.length; i++) {
             let r = results[i]
-            let status = r.success
-                ? `${r.latency}ms  |  ${this.formatSpeed(r.speed)}  (${this.formatSize(r.size)})`
-                : "连接失败"
-            let mark = ""
-            if (i === 0 && r.success) {
-                mark = " 👈 最快"
-            }
-            message += `线路${r.index}: ${r.domain}\n速度: ${status}${mark}\n\n`
+            let status = r.success ? `${r.latency}ms` : "连接失败"
+            let mark = i === 0 && r.success ? " 👈 最快" : ""
+            message += `线路${r.index}: ${r.domain}\n延迟: ${status}${mark}\n\n`
         }
 
         if (!results[0].success) {
@@ -291,21 +279,115 @@ class JM extends ComicSource {
         }
 
         UI.showDialog(
-            "节点测速",
+            "节点延迟",
             message,
             [
-                {
-                    text: "关闭",
-                    callback: () => { }
-                },
-                {
-                    text: "重新测速",
-                    callback: () => setTimeout(() => this.optimizeNodes(), 100)
-                }
+                { text: "关闭", callback: () => { } },
+                { text: "重新测试", callback: () => setTimeout(() => this.optimizeNodes(), 100) }
             ]
         )
     }
 
+    // ---------- 图片分流测速 ----------
+    // ---------- 图片分流测速 ----------
+    async testImageSpeed() {
+        UI.showMessage("正在测试图片分流速度...")
+
+        let results = []
+        let testedUrls = new Set()
+
+        // 并行启动 4 个节点测速
+        let tasks = []
+        for (let i = 1; i <= 4; i++) {
+            tasks.push((async (index) => {
+                // 获取该线路的图片 CDN URL
+                let cdnUrl = null
+                try {
+                    let res = await this.get(`${this.baseUrl}/setting?app_img_shunt=${index}&express=`)
+                    let setting = JSON.parse(res)
+                    cdnUrl = setting["img_host"]
+                } catch (e) {
+                    return { index: index, url: "获取失败", speed: 0, size: 0, latency: 0, success: false }
+                }
+
+                if (!cdnUrl) {
+                    return { index: index, url: "获取失败", speed: 0, size: 0, latency: 0, success: false }
+                }
+
+                let testImgBase = "/media/photos/209654/"
+                let startTime = Date.now()
+                let totalSize = 0
+
+                try {
+                    // 下载 00001.webp ~ 00003.webp 共 3 张图
+                    for (let j = 1; j <= 3; j++) {
+                        let imgName = j.toString().padStart(5, '0') + '.webp'
+                        let imgUrl = `${cdnUrl}${testImgBase}${imgName}`
+                        let fetchPromise = fetch(imgUrl, { headers: this.getImgHeaders() })
+                        let timeoutPromise = new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('timeout')), 10000)
+                        )
+                        let res = await Promise.race([fetchPromise, timeoutPromise])
+                        if (res.status !== 200) break
+                        let data = await res.arrayBuffer()
+                        totalSize += data.byteLength
+                    }
+
+                    let elapsed = (Date.now() - startTime) / 1000
+                    let speedMBps = totalSize > 0 ? (totalSize / 1024 / 1024) / elapsed : 0
+
+                    return {
+                        index: index,
+                        url: cdnUrl,
+                        speed: speedMBps,
+                        size: totalSize,
+                        latency: elapsed,
+                        success: totalSize > 0
+                    }
+                } catch (e) {
+                    return { index: index, url: cdnUrl, speed: 0, size: 0, latency: 0, success: false }
+                }
+            })(i))
+        }
+
+        results = await Promise.all(tasks)
+
+        // 排序（跳过重复标记的）
+        results.sort((a, b) => {
+            if (!a.success && !b.success) return 0
+            if (!a.success) return 1
+            if (!b.success) return -1
+            return b.speed - a.speed
+        })
+
+        let message = "图片分流测速结果:\n\n"
+        for (let i = 0; i < results.length; i++) {
+            let r = results[i]
+            let status
+            if (r.speed === -1) {
+                status = "与上相同"
+            } else if (r.success) {
+                status = `${this.formatSpeed(r.speed)}  (${this.formatSize(r.size)})`
+            } else {
+                status = "连接失败"
+            }
+            let mark = i === 0 && r.success ? " 👈 最快" : ""
+            message += `线路${r.index}: ${r.url}\n速度: ${status}${mark}\n\n`
+        }
+
+        if (results.every(r => !r.success || r.speed === -1)) {
+            message += "所有节点均连接失败，请检查网络后重试"
+        }
+
+        UI.showDialog(
+            "图片分流测速",
+            message,
+            [
+                { text: "关闭", callback: () => { } },
+                { text: "重新测速", callback: () => setTimeout(() => this.testImageSpeed(), 100) }
+            ]
+        )
+    }
     // ---------- 数据转换 ----------
     parseComic(comic) {
         let id = comic.id.toString()
@@ -813,52 +895,6 @@ class JM extends ComicSource {
         ],
     }
 
-    // ---------- 收藏 ----------
-    favorites = {
-        multiFolder: true,
-        addOrDelFavorite: async (comicId, folderId, isAdding, favoriteId) => {
-            if (isAdding) {
-                await this.post(`${this.baseUrl}/favorite`, `aid=${comicId}`)
-                await this.post(`${this.baseUrl}/favorite_folder`, `type=move&folder_id=${folderId}&aid=${comicId}`)
-            } else {
-                await this.post(`${this.baseUrl}/favorite`, `aid=${comicId}`)
-            }
-        },
-        loadFolders: async (comicId) => {
-            let res = await this.get(`${this.baseUrl}/favorite`)
-            let folders = {
-                "0": this.translate("All")
-            }
-            let json = JSON.parse(res)
-            for (let e of json.folder_list) {
-                folders[e.FID.toString()] = e.name
-            }
-            return {
-                folders: folders,
-                favorited: []
-            }
-        },
-        addFolder: async (name) => {
-            await this.post(`${this.baseUrl}/favorite_folder`, `type=add&folder_name=${name}`)
-        },
-        deleteFolder: async (folderId) => {
-            await this.post(`${this.baseUrl}/favorite_folder`, `type=del&folder_id=${folderId}`)
-        },
-        loadComics: async (page, folder) => {
-            let order = this.loadSetting('favoriteOrder')
-            let res = await this.get(`${this.baseUrl}/favorite?folder_id=${folder}&page=${page}&o=${order}`)
-            let json = JSON.parse(res)
-            let total = json.total
-            let maxPage = Math.ceil(total / 20)
-            let comics = json.list.map((e) => this.parseComic(e))
-            return {
-                comics: comics,
-                maxPage: maxPage
-            }
-        },
-        singleFolderForSingleComic: true,
-    }
-
     // ---------- 漫画详情 ----------
     comic = {
         loadInfo: async (id) => {
@@ -910,7 +946,6 @@ class JM extends ComicSource {
                     "View": data.total_views ? [data.total_views] : [],
                 },
                 recommend: related,
-                isFavorite: data.is_favorite ?? false,
                 isLiked: data.liked ?? false,
                 updateTime: updateDate,
             })
@@ -1074,14 +1109,11 @@ class JM extends ComicSource {
             buttonText: "开始测速",
             callback: () => this.optimizeNodes()
         },
-        favoriteOrder: {
-            title: "收藏夹排序",
-            type: "select",
-            options: [
-                { value: 'mr', text: '添加时间' },
-                { value: 'mp', text: '更新时间' }
-            ],
-            default: 'mr'
+        imageSpeedTest: {
+            title: "图片分流测速",
+            type: "callback",
+            buttonText: "开始测速",
+            callback: () => this.testImageSpeed()
         },
         dailyCheckInTask: {
             title: "每日自动签到",
@@ -1122,7 +1154,6 @@ class JM extends ComicSource {
             'Refresh Domain List on Startup': '启动时刷新域名列表',
             'Api Domain': 'Api域名',
             'Image Stream': '图片分流',
-            'Favorite Order': '收藏夹排序',
             'Daily Check-in Task': '每日自动签到',
             'Manual Check-In': '手动签到',
             'Check-In': '签到',
@@ -1135,6 +1166,7 @@ class JM extends ComicSource {
             'Actor': '角色',
             'View': '浏览量',
             'Optimize Nodes': '节点优选',
+            'Image Speed Test': '图片分流测速',
             'Start Test': '开始测速',
             'autoReLogin': '自动重登（保持登录）',
             'jm_account': 'JM 账号',
@@ -1146,7 +1178,6 @@ class JM extends ComicSource {
             'Refresh Domain List on Startup': '啟動時刷新域名列表',
             'Api Domain': 'Api域名',
             'Image Stream': '圖片分流',
-            'Favorite Order': '收藏夾排序',
             'Daily Check-in Task': '每日自動簽到',
             'Manual Check-In': '手動簽到',
             'Check-In': '簽到',
@@ -1159,6 +1190,7 @@ class JM extends ComicSource {
             'Actor': '角色',
             'View': '瀏覽量',
             'Optimize Nodes': '節點優選',
+            'Image Speed Test': '圖片分流測速',
             'Start Test': '開始測速',
             'autoReLogin': '自動重登（保持登錄）',
             'jm_account': 'JM 帳號',
